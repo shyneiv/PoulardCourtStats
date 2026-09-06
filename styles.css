@@ -131,3 +131,21 @@ input[type="file"] {
   .stat-grid { grid-template-columns: repeat(7, 1fr); }
   .box-table { font-size: .8rem; }
 }
+
+/* Gemini Watch with AI */
+.watch-ai-btn {
+  width: 100%;
+  margin: 10px 0 6px;
+  background: linear-gradient(135deg, #c4a0ff, #3ee0ff);
+  color: #0b1220;
+  font-weight: 800;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.settings-sub {
+  display: block;
+  margin: 14px 0 6px;
+  font-size: .9rem;
+  color: var(--ai);
+}
+.settings-panel a { color: var(--accent); }
