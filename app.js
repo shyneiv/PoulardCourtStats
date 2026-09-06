@@ -11,10 +11,11 @@ function extractYouTubeId(input) {
 }
 
 function newGame(partial = {}) {
-  const n = (load().games?.length || 0) + 1;
+  // Do not call load() here — that caused infinite recursion on first visit
+  // (empty localStorage → load → newGame → load → … → blank page).
   return {
     id: uid(),
-    title: partial.title || `Game ${n}`,
+    title: partial.title || "Game 1",
     homeName: partial.homeName || "HOME",
     awayName: partial.awayName || "AWAY",
     homeScore: 0,
