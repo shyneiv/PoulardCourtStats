@@ -1,13 +1,13 @@
 # CourtStats (phone web app)
 
-Track multiple basketball games from your iPhone Safari browser — live scoring, YouTube watch mode, dual-team box scores, and optional AI capture from broadcast graphics. No Xcode or backend required (static GitHub Pages).
+Track multiple basketball games from your iPhone Safari browser — live scoring, YouTube watch mode, dual-team box scores, Gemini YouTube “Watch with AI”, and optional screenshot AI Capture. No Xcode or backend required (static GitHub Pages).
 
 ## Fastest way on iPhone
 
 1. Open the GitHub Pages HTTPS link in Safari.
 2. Optional: Share → **Add to Home Screen** so it feels like an app.
 
-Games and your API key are stored only in the phone’s browser (`localStorage`).
+Games and your API keys are stored only in the phone’s browser (`localStorage`).
 
 ## Tabs
 
@@ -16,24 +16,37 @@ Games and your API key are stored only in the phone’s browser (`localStorage`)
 | **Dash** | All games, quick +1/+2/+3, rename teams |
 | **Score** | Focused scoreboard for the selected game |
 | **Box** | Home/Away rosters + live box score tables + tap-to-stat pad |
-| **Watch** | YouTube embed + roster chips + stat pad + **AI Capture** |
+| **Watch** | YouTube embed + **Watch with AI** (Gemini) + roster chips + screenshot **AI Capture** |
 | **Log** | Play-by-play / AI event history |
 
-## Watch + AI Capture
+## Watch with AI (Gemini + YouTube URL)
+
+Gemini can analyze a **public** YouTube game URL (video understanding) and fill the box score — **no screenshots required**.
 
 1. Open **Watch**, paste a YouTube URL (or video ID), tap **Play**.
-2. Edit Home/Away rosters (default: Player 1–5 each side). Tap a player, then use +PTS / +REB / … or FG make/miss buttons.
-3. Tap ⚙ (or **Settings** on Watch/Box) and save:
-   - **API key** (OpenAI-compatible)
-   - **Base URL** (default `https://api.openai.com/v1`)
-   - **Model** (default `gpt-4o-mini`, vision-capable)
-4. **AI Capture**: take/upload a photo of the TV scorebug or box-score graphic, add an optional note, tap **AI Capture**. The app calls Chat Completions with the image and merges returned JSON into both rosters (match by player name, case-insensitive; unknown players are added). Team scores update when provided. Events log gets an “AI Capture” note. Rows filled by AI show **AI-assisted — verify**.
+2. Tap ⚙ (or **Settings**) and save a **Gemini API key** (+ optional model; default `gemini-2.0-flash`).
+   - Create a key at [Google AI Studio](https://aistudio.google.com/apikey).
+3. Tap **✦ Watch YouTube with AI**. Status shows *Gemini is watching the game… this can take a minute* (often 30–120+ seconds).
+4. On success, rosters merge (same JSON shape as screenshot AI), team scores update, players are marked **AI-assisted**, and the Log gets an `AI Watch` event (`ai: true`).
 
-### YouTube iframe limitation
+### Limitations
 
-Browsers (and YouTube) do **not** allow the page to read pixels from an embedded YouTube iframe. The AI cannot “see” the playing video directly — you must **screenshot or photograph** the scorebug / graphic and upload that image.
+- Videos must be **public** (private/unlisted may fail).
+- The app does **not** read iframe pixels — Gemini receives the canonical `https://www.youtube.com/watch?v=ID` via the Generative Language API.
+- Best on **completed / VOD** games. Live or incomplete streams may fail or return partial box scores.
+- Always verify AI-assisted rows.
 
-Settings are saved under `localStorage` key `courtstats.ai.v1`. Games use `courtstats.games.v1`.
+Settings (`courtstats.ai.v1`) store: OpenAI `apiKey` / `baseUrl` / `model` (screenshot path) and `geminiKey` / `geminiModel` (YouTube watch). Games use `courtstats.games.v1`.
+
+## Screenshot AI Capture (OpenAI-compatible)
+
+1. Same Watch tab: upload/take a photo of the TV scorebug or box-score graphic.
+2. Configure OpenAI-compatible **API key**, **Base URL** (`https://api.openai.com/v1`), and vision **Model** (default `gpt-4o-mini`).
+3. Tap **AI Capture**. Merges returned JSON into both rosters by player name.
+
+### YouTube iframe limitation (screenshots)
+
+Browsers (and YouTube) do **not** allow the page to read pixels from an embedded YouTube iframe. Screenshot/photo AI Capture still needs an uploaded image; use **Watch with AI** when you want Gemini to analyze the public URL instead.
 
 ## Open on a computer first
 
