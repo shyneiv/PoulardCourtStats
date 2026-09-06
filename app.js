@@ -82,18 +82,30 @@ function load() {
   }
 }
 
+function defaultAI() {
+  return {
+    apiKey: "",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    geminiKey: "",
+    geminiModel: "gemini-2.0-flash",
+  };
+}
+
 function loadAI() {
   try {
     const raw = localStorage.getItem(AI_STORAGE_KEY);
-    if (!raw) return { apiKey: "", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" };
+    if (!raw) return defaultAI();
     const d = JSON.parse(raw);
     return {
       apiKey: d.apiKey || "",
       baseUrl: d.baseUrl || "https://api.openai.com/v1",
       model: d.model || "gpt-4o-mini",
+      geminiKey: d.geminiKey || "",
+      geminiModel: d.geminiModel || "gemini-2.0-flash",
     };
   } catch {
-    return { apiKey: "", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" };
+    return defaultAI();
   }
 }
 
@@ -326,29 +338,122 @@ Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
     const json = await res.json();
     const content = json.choices?.[0]?.message?.content || "";
     const data = parseAIJson(content);
-    const notes = [];
-    notes.push(...mergeAIRoster(game.homeRoster, data.home, game.homeName));
-    notes.push(...mergeAIRoster(game.awayRoster, data.away, game.awayName));
-    if (data.homeScore != null && data.homeScore !== "") game.homeScore = Number(data.homeScore) || game.homeScore;
-    else game.homeScore = teamTotals(game.homeRoster).PTS;
-    if (data.awayScore != null && data.awayScore !== "") game.awayScore = Number(data.awayScore) || game.awayScore;
-    else game.awayScore = teamTotals(game.awayRoster).PTS;
-    const summary = data.note || notes.join("; ") || "AI box score update";
-    game.events.unshift({
-      id: uid(),
-      t: Date.now(),
-      home: game.homeScore,
-      away: game.awayScore,
-      dH: 0, dA: 0,
-      note: `AI Capture: ${summary}`,
-      period: game.period,
-      ai: true,
-    });
+    applyAIBoxResult(game, data, "AI Capture");
     aiStatus = "AI update applied — verify stats.";
     captureNote = "";
     save();
   } catch (e) {
     aiStatus = `AI failed: ${e.message || e}`;
+  } finally {
+    aiBusy = false;
+    render();
+  }
+}
+
+function youtubeWatchUrl(game) {
+  const id = game.videoID || extractYouTubeId(game.youtubeURL);
+  return id ? `https://www.youtube.com/watch?v=${id}` : null;
+}
+
+function boxScorePrompt(game, mode) {
+  const watchHint = mode === "youtube"
+    ? `Watch and analyze this public basketball game YouTube video end-to-end (best-effort). Extract player box scores for both teams from what is visible (scorebugs, graphics, jersey names/numbers, commentary cues). Label uncertainty in the note field. Prefer completed/VOD games; live/incomplete streams may be incomplete.`
+    : `Read scorebugs, broadcast graphics, and box score images.`;
+  return `You are a basketball box-score assistant. ${watchHint}
+Return STRICT JSON only (no markdown) with this exact shape:
+{"home":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"homeScore":0,"awayScore":0,"note":""}
+Use integers. Omit unknown stats as 0. Prefer jersey/names when visible. Team names from game state when possible.
+Current home team: ${game.homeName}. Current away team: ${game.awayName}.
+Known home players: ${game.homeRoster.map((p) => p.name).join(", ")}.
+Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
+}
+
+function applyAIBoxResult(game, data, label) {
+  const notes = [];
+  notes.push(...mergeAIRoster(game.homeRoster, data.home, game.homeName));
+  notes.push(...mergeAIRoster(game.awayRoster, data.away, game.awayName));
+  if (data.homeScore != null && data.homeScore !== "") game.homeScore = Number(data.homeScore) || game.homeScore;
+  else game.homeScore = teamTotals(game.homeRoster).PTS;
+  if (data.awayScore != null && data.awayScore !== "") game.awayScore = Number(data.awayScore) || game.awayScore;
+  else game.awayScore = teamTotals(game.awayRoster).PTS;
+  const summary = data.note || notes.join("; ") || `${label} box score update`;
+  game.events.unshift({
+    id: uid(),
+    t: Date.now(),
+    home: game.homeScore,
+    away: game.awayScore,
+    dH: 0, dA: 0,
+    note: `${label}: ${summary}`,
+    period: game.period,
+    ai: true,
+  });
+  return summary;
+}
+
+async function runGeminiYouTubeWatch(game) {
+  if (!aiCfg.geminiKey) {
+    aiStatus = "Set your Gemini API key in Settings first.";
+    showSettings = true;
+    render();
+    return;
+  }
+  const ytUrl = youtubeWatchUrl(game);
+  if (!ytUrl) {
+    aiStatus = "Paste a public YouTube URL (or ID) and tap Play first.";
+    render();
+    return;
+  }
+  // Keep videoID in sync if only youtubeURL was set
+  if (!game.videoID) {
+    game.videoID = extractYouTubeId(game.youtubeURL);
+    game.youtubeURL = game.youtubeURL || ytUrl;
+  }
+  aiBusy = true;
+  aiStatus = "Gemini is watching the game… this can take a minute";
+  render();
+  try {
+    const model = (aiCfg.geminiModel || "gemini-2.0-flash").trim() || "gemini-2.0-flash";
+    const prompt = boxScorePrompt(game, "youtube");
+    const body = {
+      contents: [{
+        parts: [
+          { file_data: { file_uri: ytUrl } },
+          { text: prompt },
+        ],
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        responseMimeType: "application/json",
+      },
+    };
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(aiCfg.geminiKey)}`;
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const errText = await res.text().catch(() => "");
+    if (!res.ok) {
+      throw new Error(`Gemini ${res.status}: ${errText.slice(0, 280)}`);
+    }
+    let json;
+    try { json = JSON.parse(errText); } catch { throw new Error("Gemini returned non-JSON response"); }
+    const block = json.promptFeedback?.blockReason;
+    if (block) throw new Error(`Gemini blocked: ${block}`);
+    const content = (json.candidates || [])
+      .map((c) => (c.content?.parts || []).map((p) => p.text || "").join(""))
+      .join("\n")
+      .trim();
+    if (!content) {
+      const finish = json.candidates?.[0]?.finishReason || "empty";
+      throw new Error(`No content from Gemini (${finish})`);
+    }
+    const data = parseAIJson(content);
+    applyAIBoxResult(game, data, "AI Watch");
+    aiStatus = "Gemini watch applied — verify stats.";
+    save();
+  } catch (e) {
+    aiStatus = `Gemini failed: ${e.message || e}`;
   } finally {
     aiBusy = false;
     render();
@@ -416,7 +521,8 @@ function renderSettings() {
         <strong>AI Settings</strong>
         <button class="btn btn-ghost" id="closeSettings">Close</button>
       </div>
-      <p class="muted">Stored only in this browser (localStorage). OpenAI-compatible Chat Completions + vision.</p>
+      <p class="muted">Stored only in this browser (localStorage).</p>
+      <strong class="settings-sub">Screenshot AI Capture (OpenAI-compatible)</strong>
       <label class="field"><span>API key</span>
         <input type="password" id="aiKey" placeholder="sk-…" value="${escapeHtml(aiCfg.apiKey)}" autocomplete="off" />
       </label>
@@ -426,8 +532,17 @@ function renderSettings() {
       <label class="field"><span>Model</span>
         <input type="text" id="aiModel" value="${escapeHtml(aiCfg.model)}" />
       </label>
+      ${aiCfg.apiKey ? `<div class="muted ok">OpenAI key saved (${aiCfg.apiKey.length} chars)</div>` : `<div class="muted">No OpenAI key — screenshot AI Capture disabled</div>`}
+      <strong class="settings-sub">Gemini YouTube Watch</strong>
+      <p class="muted">Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. YouTube videos must be <strong>public</strong>. Best on completed/VOD games; live/incomplete streams may fail or be incomplete. Analysis can take 30–120+ seconds.</p>
+      <label class="field"><span>Gemini API key</span>
+        <input type="password" id="geminiKey" placeholder="AIza…" value="${escapeHtml(aiCfg.geminiKey)}" autocomplete="off" />
+      </label>
+      <label class="field"><span>Gemini model</span>
+        <input type="text" id="geminiModel" placeholder="gemini-2.0-flash" value="${escapeHtml(aiCfg.geminiModel)}" />
+      </label>
+      ${aiCfg.geminiKey ? `<div class="muted ok">Gemini key saved (${aiCfg.geminiKey.length} chars)</div>` : `<div class="muted">No Gemini key — Watch with AI disabled</div>`}
       <button class="btn btn-primary" id="saveAI">Save</button>
-      ${aiCfg.apiKey ? `<div class="muted ok">Key saved (${aiCfg.apiKey.length} chars)</div>` : `<div class="muted">No key yet — AI Capture disabled</div>`}
     </div>
   `;
 }
@@ -441,6 +556,8 @@ function bindSettings() {
       apiKey: document.getElementById("aiKey").value.trim(),
       baseUrl: document.getElementById("aiBase").value.trim() || "https://api.openai.com/v1",
       model: document.getElementById("aiModel").value.trim() || "gpt-4o-mini",
+      geminiKey: document.getElementById("geminiKey").value.trim(),
+      geminiModel: document.getElementById("geminiModel").value.trim() || "gemini-2.0-flash",
     };
     saveAI(aiCfg);
     aiStatus = "AI settings saved.";
@@ -619,7 +736,7 @@ function renderBox(g) {
     ${statPad(g)}
     <div class="card">
       <button class="btn btn-ghost" id="boxOpenSettings">AI Settings</button>
-      <p class="muted">Tip: use Watch tab for YouTube + AI Capture of scorebugs.</p>
+      <p class="muted">Tip: Watch tab — Gemini YouTube Watch or screenshot AI Capture.</p>
     </div>
   `;
 }
@@ -636,7 +753,10 @@ function renderWatch(g) {
         <button class="btn btn-primary" id="loadYt">Play</button>
       </div>
       <div class="player">${src ? `<iframe id="ytFrame" src="${src}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" allowfullscreen></iframe>` : `<div class="muted" style="padding:48px;text-align:center">Paste a YouTube link for this game</div>`}</div>
-      <p class="muted warn">YouTube iframes can't be read by AI — screenshot / photo the scorebug, then use AI Capture below.</p>
+      <p class="muted warn">Embedded YouTube iframes cannot be read as pixels. Use <strong>Watch with AI</strong> (Gemini analyzes the public YouTube URL server-side) or screenshot AI Capture below.</p>
+      <button class="btn watch-ai-btn" id="geminiWatch" ${aiBusy ? "disabled" : ""}>${aiBusy ? "Working…" : "✦ Watch YouTube with AI"}</button>
+      <p class="muted">Requires a Gemini key in Settings. Public videos only; VOD/completed games work best (30–120+ sec).</p>
+      ${aiStatus ? `<div class="ai-status">${escapeHtml(aiStatus)}</div>` : ""}
     </div>
     ${rosterEditor("home", g)}
     ${rosterEditor("away", g)}
@@ -835,6 +955,8 @@ function bindWatch() {
     const file = document.getElementById("aiFile")?.files?.[0];
     runAICapture(g, file, document.getElementById("aiNote")?.value || "");
   };
+  const gem = document.getElementById("geminiWatch");
+  if (gem) gem.onclick = () => { runGeminiYouTubeWatch(g); };
   const ws = document.getElementById("watchOpenSettings");
   if (ws) ws.onclick = () => { showSettings = true; render(); };
 }
