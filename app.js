@@ -655,7 +655,8 @@ function renderWatch(g) {
     <div class="card capture-card">
       <strong>AI Capture</strong>
       <p class="muted">Upload or take a photo of the broadcast scorebug / box score graphic.</p>
-      <input type="file" id="aiFile" accept="image/*" capture="environment" />
+      <input type="file" id="aiFile" accept="image/*" />
+      <div class="muted">Photo library or camera — screenshots work.</div>
       <label class="field"><span>Optional note</span>
         <input type="text" id="aiNote" placeholder="e.g. end of Q3 box score" value="${escapeHtml(captureNote)}" />
       </label>
