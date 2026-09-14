@@ -88,7 +88,7 @@ function defaultAI() {
     baseUrl: "https://api.openai.com/v1",
     model: "gpt-4o-mini",
     geminiKey: "",
-    geminiModel: "gemini-2.0-flash",
+    geminiModel: "gemini-3.6-flash",
   };
 }
 
@@ -102,7 +102,7 @@ function loadAI() {
       baseUrl: d.baseUrl || "https://api.openai.com/v1",
       model: d.model || "gpt-4o-mini",
       geminiKey: d.geminiKey || "",
-      geminiModel: d.geminiModel || "gemini-2.0-flash",
+      geminiModel: normalizeGeminiModel(d.geminiModel),
     };
   } catch {
     return defaultAI();
@@ -412,7 +412,7 @@ async function runGeminiYouTubeWatch(game) {
   aiStatus = "Gemini is watching the game… this can take a minute";
   render();
   try {
-    const model = (aiCfg.geminiModel || "gemini-2.0-flash").trim() || "gemini-2.0-flash";
+    const model = normalizeGeminiModel(aiCfg.geminiModel);
     const prompt = boxScorePrompt(game, "youtube");
     const body = {
       contents: [{
@@ -539,7 +539,7 @@ function renderSettings() {
         <input type="password" id="geminiKey" placeholder="AIza…" value="${escapeHtml(aiCfg.geminiKey)}" autocomplete="off" />
       </label>
       <label class="field"><span>Gemini model</span>
-        <input type="text" id="geminiModel" placeholder="gemini-2.0-flash" value="${escapeHtml(aiCfg.geminiModel)}" />
+        <input type="text" id="geminiModel" placeholder="gemini-3.6-flash" value="${escapeHtml(aiCfg.geminiModel)}" />
       </label>
       ${aiCfg.geminiKey ? `<div class="muted ok">Gemini key saved (${aiCfg.geminiKey.length} chars)</div>` : `<div class="muted">No Gemini key — Watch with AI disabled</div>`}
       <button class="btn btn-primary" id="saveAI">Save</button>
@@ -557,7 +557,7 @@ function bindSettings() {
       baseUrl: document.getElementById("aiBase").value.trim() || "https://api.openai.com/v1",
       model: document.getElementById("aiModel").value.trim() || "gpt-4o-mini",
       geminiKey: document.getElementById("geminiKey").value.trim(),
-      geminiModel: document.getElementById("geminiModel").value.trim() || "gemini-2.0-flash",
+      geminiModel: normalizeGeminiModel(document.getElementById("geminiModel").value),
     };
     saveAI(aiCfg);
     aiStatus = "AI settings saved.";
