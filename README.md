@@ -57,3 +57,6 @@ Double-click `index.html` works for scoring. For YouTube embeds, hosting on HTTP
 - Native App Store install
 - On-device Vision OCR without an API key
 - Xcode project / backend server
+
+
+If Gemini returns **503 / high demand**, the app automatically retries and tries fallback Flash models.
