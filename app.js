@@ -82,6 +82,48 @@ function load() {
   }
 }
 
+
+function normalizeGeminiModel(m) {
+  const model = (m || "").trim();
+  const retired = new Set([
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+  ]);
+  if (!model || retired.has(model)) return "gemini-3.6-flash";
+  return model;
+}
+
+/** Prefer user model, then other Flash variants when overloaded / missing. */
+function geminiModelFallbackChain(preferred) {
+  const primary = normalizeGeminiModel(preferred);
+  const candidates = [
+    primary,
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const c of candidates) {
+    const n = normalizeGeminiModel(c);
+    if (seen.has(n)) continue;
+    seen.add(n);
+    out.push(n);
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function isRetryableGeminiStatus(status) {
+  return status === 429 || status === 503 || status === 500;
+}
+
 function defaultAI() {
   return {
     apiKey: "",
@@ -390,6 +432,17 @@ function applyAIBoxResult(game, data, label) {
   return summary;
 }
 
+async function callGeminiGenerate(model, body, apiKey) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const errText = await res.text().catch(() => "");
+  return { res, errText };
+}
+
 async function runGeminiYouTubeWatch(game) {
   if (!aiCfg.geminiKey) {
     aiStatus = "Set your Gemini API key in Settings first.";
@@ -403,7 +456,6 @@ async function runGeminiYouTubeWatch(game) {
     render();
     return;
   }
-  // Keep videoID in sync if only youtubeURL was set
   if (!game.videoID) {
     game.videoID = extractYouTubeId(game.youtubeURL);
     game.youtubeURL = game.youtubeURL || ytUrl;
@@ -412,7 +464,6 @@ async function runGeminiYouTubeWatch(game) {
   aiStatus = "Gemini is watching the game… this can take a minute";
   render();
   try {
-    const model = normalizeGeminiModel(aiCfg.geminiModel);
     const prompt = boxScorePrompt(game, "youtube");
     const body = {
       contents: [{
@@ -426,18 +477,55 @@ async function runGeminiYouTubeWatch(game) {
         responseMimeType: "application/json",
       },
     };
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(aiCfg.geminiKey)}`;
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const errText = await res.text().catch(() => "");
-    if (!res.ok) {
-      throw new Error(`Gemini ${res.status}: ${errText.slice(0, 280)}`);
+
+    const models = geminiModelFallbackChain(aiCfg.geminiModel);
+    let lastErr = null;
+    let json = null;
+    let usedModel = models[0];
+
+    for (let mi = 0; mi < models.length; mi++) {
+      const model = models[mi];
+      usedModel = model;
+      // A few attempts per model for transient overload
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        aiStatus = models.length > 1 && mi > 0
+          ? `Busy on prior model — trying ${model} (attempt ${attempt}/3)…`
+          : `Gemini (${model}) watching… attempt ${attempt}/3`;
+        render();
+        try {
+          const { res, errText } = await callGeminiGenerate(model, body, aiCfg.geminiKey);
+          if (!res.ok) {
+            lastErr = new Error(`Gemini ${res.status}: ${errText.slice(0, 280)}`);
+            if (res.status === 404) break; // try next model
+            if (isRetryableGeminiStatus(res.status) && attempt < 3) {
+              const wait = 1500 * attempt * attempt; // 1.5s, 6s, …
+              aiStatus = `Gemini busy (${res.status}). Retrying in ${Math.round(wait / 1000)}s…`;
+              render();
+              await sleep(wait);
+              continue;
+            }
+            if (isRetryableGeminiStatus(res.status)) break; // next model
+            throw lastErr; // non-retryable
+          }
+          try { json = JSON.parse(errText); } catch {
+            throw new Error("Gemini returned non-JSON response");
+          }
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = e;
+          if (attempt < 3 && /Failed to fetch|NetworkError|network/i.test(String(e.message || e))) {
+            await sleep(1500 * attempt);
+            continue;
+          }
+          throw e;
+        }
+      }
+      if (json) break;
     }
-    let json;
-    try { json = JSON.parse(errText); } catch { throw new Error("Gemini returned non-JSON response"); }
+
+    if (!json) throw lastErr || new Error("Gemini unavailable after retries");
+
     const block = json.promptFeedback?.blockReason;
     if (block) throw new Error(`Gemini blocked: ${block}`);
     const content = (json.candidates || [])
@@ -450,7 +538,7 @@ async function runGeminiYouTubeWatch(game) {
     }
     const data = parseAIJson(content);
     applyAIBoxResult(game, data, "AI Watch");
-    aiStatus = "Gemini watch applied — verify stats.";
+    aiStatus = `Gemini watch applied via ${usedModel} — verify stats.`;
     save();
   } catch (e) {
     aiStatus = `Gemini failed: ${e.message || e}`;
