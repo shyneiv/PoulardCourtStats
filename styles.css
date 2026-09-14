@@ -149,3 +149,6 @@ input[type="file"] {
   color: var(--ai);
 }
 .settings-panel a { color: var(--accent); }
+
+.key-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; letter-spacing: 0.02em; }
+#settingsSaveMsg { color: #ff8b9a; margin-top: 8px; }
