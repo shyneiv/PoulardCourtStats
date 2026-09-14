@@ -24,7 +24,7 @@ Games and your API keys are stored only in the phone’s browser (`localStorage`
 Gemini can analyze a **public** YouTube game URL (video understanding) and fill the box score — **no screenshots required**.
 
 1. Open **Watch**, paste a YouTube URL (or video ID), tap **Play**.
-2. Tap ⚙ (or **Settings**) and save a **Gemini API key** (+ optional model; default `gemini-2.0-flash`).
+2. Tap ⚙ (or **Settings**) and save a **Gemini API key** (+ optional model; default `gemini-3.6-flash`).
    - Create a key at [Google AI Studio](https://aistudio.google.com/apikey).
 3. Tap **✦ Watch YouTube with AI**. Status shows *Gemini is watching the game… this can take a minute* (often 30–120+ seconds).
 4. On success, rosters merge (same JSON shape as screenshot AI), team scores update, players are marked **AI-assisted**, and the Log gets an `AI Watch` event (`ai: true`).
