@@ -153,6 +153,9 @@ function loadAI() {
 
 function saveAI(cfg) {
   localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(cfg));
+  // Verify immediately so callers can detect private-mode / blocked storage
+  const roundTrip = localStorage.getItem(AI_STORAGE_KEY);
+  if (!roundTrip) throw new Error("Storage write failed");
 }
 
 let state = load();
@@ -607,30 +610,31 @@ function renderSettings() {
     <div class="card settings-panel">
       <div class="row spread">
         <strong>AI Settings</strong>
-        <button class="btn btn-ghost" id="closeSettings">Close</button>
+        <button type="button" class="btn btn-ghost" id="closeSettings">Close</button>
       </div>
-      <p class="muted">Stored only in this browser (localStorage).</p>
+      <p class="muted">Stored only in this browser (localStorage). Keys use text fields so iPhone Safari won’t drop them on Save.</p>
       <strong class="settings-sub">Screenshot AI Capture (OpenAI-compatible)</strong>
       <label class="field"><span>API key</span>
-        <input type="password" id="aiKey" placeholder="sk-…" value="${escapeHtml(aiCfg.apiKey)}" autocomplete="off" />
+        <input type="text" id="aiKey" class="key-input" placeholder="sk-…" value="${escapeHtml(aiCfg.apiKey)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </label>
       <label class="field"><span>Base URL</span>
-        <input type="text" id="aiBase" value="${escapeHtml(aiCfg.baseUrl)}" />
+        <input type="text" id="aiBase" value="${escapeHtml(aiCfg.baseUrl)}" autocomplete="off" />
       </label>
       <label class="field"><span>Model</span>
-        <input type="text" id="aiModel" value="${escapeHtml(aiCfg.model)}" />
+        <input type="text" id="aiModel" value="${escapeHtml(aiCfg.model)}" autocomplete="off" />
       </label>
       ${aiCfg.apiKey ? `<div class="muted ok">OpenAI key saved (${aiCfg.apiKey.length} chars)</div>` : `<div class="muted">No OpenAI key — screenshot AI Capture disabled</div>`}
       <strong class="settings-sub">Gemini YouTube Watch</strong>
       <p class="muted">Get a key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. YouTube videos must be <strong>public</strong>. Best on completed/VOD games; live/incomplete streams may fail or be incomplete. Analysis can take 30–120+ seconds.</p>
       <label class="field"><span>Gemini API key</span>
-        <input type="password" id="geminiKey" placeholder="AIza…" value="${escapeHtml(aiCfg.geminiKey)}" autocomplete="off" />
+        <input type="text" id="geminiKey" class="key-input" placeholder="AIza…" value="${escapeHtml(aiCfg.geminiKey)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
       </label>
       <label class="field"><span>Gemini model</span>
-        <input type="text" id="geminiModel" placeholder="gemini-3.6-flash" value="${escapeHtml(aiCfg.geminiModel)}" />
+        <input type="text" id="geminiModel" placeholder="gemini-3.6-flash" value="${escapeHtml(aiCfg.geminiModel)}" autocomplete="off" />
       </label>
-      ${aiCfg.geminiKey ? `<div class="muted ok">Gemini key saved (${aiCfg.geminiKey.length} chars)</div>` : `<div class="muted">No Gemini key — Watch with AI disabled</div>`}
-      <button class="btn btn-primary" id="saveAI">Save</button>
+      ${aiCfg.geminiKey ? `<div class="muted ok" id="geminiKeyStatus">Gemini key saved (${aiCfg.geminiKey.length} chars)</div>` : `<div class="muted" id="geminiKeyStatus">No Gemini key — Watch with AI disabled</div>`}
+      <button type="button" class="btn btn-primary" id="saveAI">Save</button>
+      <div class="muted" id="settingsSaveMsg"></div>
     </div>
   `;
 }
@@ -639,18 +643,54 @@ function bindSettings() {
   const close = document.getElementById("closeSettings");
   if (close) close.onclick = () => { showSettings = false; render(); };
   const saveBtn = document.getElementById("saveAI");
-  if (saveBtn) saveBtn.onclick = () => {
-    aiCfg = {
-      apiKey: document.getElementById("aiKey").value.trim(),
-      baseUrl: document.getElementById("aiBase").value.trim() || "https://api.openai.com/v1",
-      model: document.getElementById("aiModel").value.trim() || "gpt-4o-mini",
-      geminiKey: document.getElementById("geminiKey").value.trim(),
-      geminiModel: normalizeGeminiModel(document.getElementById("geminiModel").value),
+  if (!saveBtn) return;
+
+  const commitSave = () => {
+    const aiKeyEl = document.getElementById("aiKey");
+    const geminiKeyEl = document.getElementById("geminiKey");
+    const msg = document.getElementById("settingsSaveMsg");
+    // Blur first so mobile Safari commits pasted text into .value
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+
+    const typedOpenAI = (aiKeyEl?.value || "").trim();
+    const typedGemini = (geminiKeyEl?.value || "").trim();
+    // Empty secret field means "keep existing" (iOS sometimes clears password/text fields visually)
+    const next = {
+      apiKey: typedOpenAI || aiCfg.apiKey || "",
+      baseUrl: (document.getElementById("aiBase")?.value || "").trim() || "https://api.openai.com/v1",
+      model: (document.getElementById("aiModel")?.value || "").trim() || "gpt-4o-mini",
+      geminiKey: typedGemini || aiCfg.geminiKey || "",
+      geminiModel: normalizeGeminiModel(document.getElementById("geminiModel")?.value),
     };
-    saveAI(aiCfg);
-    aiStatus = "AI settings saved.";
-    showSettings = false;
-    render();
+
+    try {
+      saveAI(next);
+      const verify = loadAI();
+      if (typedGemini && verify.geminiKey !== typedGemini) {
+        throw new Error("localStorage did not keep the Gemini key (private mode / storage blocked?)");
+      }
+      if (!verify.geminiKey) {
+        if (msg) msg.textContent = "Saved, but Gemini key is still empty — paste the key into the Gemini field and Save again.";
+        aiCfg = verify;
+        render();
+        return;
+      }
+      aiCfg = verify;
+      aiStatus = `AI settings saved. Gemini key OK (${aiCfg.geminiKey.length} chars).`;
+      showSettings = false;
+      render();
+    } catch (e) {
+      if (msg) msg.textContent = `Could not save: ${e.message || e}`;
+      else alert(`Could not save settings: ${e.message || e}`);
+    }
+  };
+
+  // pointerdown reads sooner than click on some iOS versions
+  saveBtn.onpointerdown = (e) => { e.preventDefault(); };
+  saveBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    commitSave();
   };
 }
 
