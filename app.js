@@ -279,13 +279,19 @@ function pct(m, a) {
   return Math.round((m / a) * 100) + "%";
 }
 
+function isPlaceholderPlayer(p) {
+  return /^player\s*\d+$/i.test(String(p.name || "").trim());
+}
+
 function mergeAIRoster(existing, incoming, sideLabel) {
   const byName = new Map();
   existing.forEach((p) => byName.set(String(p.name || "").trim().toLowerCase(), p));
   const notes = [];
+  let addedReal = 0;
   (incoming || []).forEach((row) => {
     const name = String(row.name || "").trim();
     if (!name) return;
+    if (/^player\s*\d+$/i.test(name)) return; // never import placeholders
     const key = name.toLowerCase();
     let p = byName.get(key);
     if (!p) {
@@ -293,15 +299,56 @@ function mergeAIRoster(existing, incoming, sideLabel) {
       existing.push(p);
       byName.set(key, p);
       notes.push(`Added ${sideLabel} ${name}`);
+      addedReal += 1;
     }
     STAT_KEYS.forEach((k) => {
       if (row[k] != null && row[k] !== "") {
         const n = Number(row[k]);
-        if (!Number.isNaN(n)) p[k] = n;
+        if (!Number.isNaN(n)) p[k] = Math.max(0, Math.round(n));
       }
     });
     p.aiAssisted = true;
   });
+  // Drop default Player 1–5 rows once real names arrive
+  if (addedReal > 0 || (incoming || []).some((r) => r && r.name && !/^player\s*\d+$/i.test(String(r.name)))) {
+    for (let i = existing.length - 1; i >= 0; i--) {
+      if (isPlaceholderPlayer(existing[i])) existing.splice(i, 1);
+    }
+  }
+  return notes;
+}
+
+/** Make roster PTS sum match the official team score. */
+function reconcileRosterToScore(roster, officialScore, sideLabel) {
+  const notes = [];
+  const target = Math.max(0, Math.round(Number(officialScore) || 0));
+  let sum = teamTotals(roster).PTS;
+  // Remove leftover placeholders with 0 contribution
+  for (let i = roster.length - 1; i >= 0; i--) {
+    if (isPlaceholderPlayer(roster[i]) && (Number(roster[i].PTS) || 0) === 0) roster.splice(i, 1);
+  }
+  sum = teamTotals(roster).PTS;
+  const delta = target - sum;
+  if (delta === 0) return notes;
+
+  let unassigned = roster.find((p) => /^unassigned$/i.test(String(p.name || "").trim()));
+  if (!unassigned) {
+    unassigned = makePlayer("Unassigned");
+    unassigned.aiAssisted = true;
+    roster.push(unassigned);
+  }
+  unassigned.PTS = Math.max(0, (Number(unassigned.PTS) || 0) + delta);
+  unassigned.aiAssisted = true;
+  // If delta negative, we reduced unassigned; if still over, trim unassigned to 0 then leave mismatch note
+  if (unassigned.PTS === 0 && delta < 0) {
+    // try reducing from highest scorer cautiously — keep simple: leave mismatch flagged
+  }
+  sum = teamTotals(roster).PTS;
+  if (sum !== target) {
+    notes.push(`${sideLabel} PTS sum ${sum} ≠ score ${target}`);
+  } else if (delta !== 0) {
+    notes.push(`${sideLabel}: allocated ${delta > 0 ? "+" : ""}${delta} PTS to Unassigned so lineup matches score ${target}`);
+  }
   return notes;
 }
 
@@ -383,8 +430,10 @@ Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
     const json = await res.json();
     const content = json.choices?.[0]?.message?.content || "";
     const data = parseAIJson(content);
-    applyAIBoxResult(game, data, "AI Capture");
-    aiStatus = "AI update applied — verify stats.";
+    const result = applyAIBoxResult(game, data, "AI Capture");
+    aiStatus = result.matched
+      ? `AI update applied — score ${game.homeScore}–${game.awayScore}, roster PTS match.`
+      : `AI update applied — score ${game.homeScore}–${game.awayScore}, but roster PTS were ${result.homeSum}–${result.awaySum}. Check Unassigned.`;
     captureNote = "";
     save();
   } catch (e) {
@@ -402,37 +451,65 @@ function youtubeWatchUrl(game) {
 
 function boxScorePrompt(game, mode) {
   const watchHint = mode === "youtube"
-    ? `Watch and analyze this public basketball game YouTube video end-to-end (best-effort). Extract player box scores for both teams from what is visible (scorebugs, graphics, jersey names/numbers, commentary cues). Label uncertainty in the note field. Prefer completed/VOD games; live/incomplete streams may be incomplete.`
+    ? `Watch and analyze this public basketball game YouTube video. Prioritize the official scorebug and any on-screen box score / player stat graphics. Use commentary only as a secondary cue.`
     : `Read scorebugs, broadcast graphics, and box score images.`;
   return `You are a basketball box-score assistant. ${watchHint}
+
+CRITICAL ACCURACY RULES:
+1. homeScore and awayScore MUST be the official team scores shown on the scorebug (or final score if the game is over).
+2. For each team, the SUM of all player PTS MUST equal that team's homeScore/awayScore exactly.
+3. If you cannot attribute every point to a named player, put the remaining points on a player named "Unassigned" so the sums still match.
+4. Include only real players you can support from the video/graphic — never invent stars. Do not output placeholder names like "Player 1".
+5. Use integers only. Unknown non-PTS stats may be 0.
+6. home[] is ${game.homeName}; away[] is ${game.awayName}. Do not swap teams.
+
 Return STRICT JSON only (no markdown) with this exact shape:
 {"home":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"homeScore":0,"awayScore":0,"note":""}
-Use integers. Omit unknown stats as 0. Prefer jersey/names when visible. Team names from game state when possible.
+
 Current home team: ${game.homeName}. Current away team: ${game.awayName}.
-Known home players: ${game.homeRoster.map((p) => p.name).join(", ")}.
-Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
+Known home players: ${game.homeRoster.filter((p) => !/^player\s*\d+$/i.test(p.name)).map((p) => p.name).join(", ") || "(none yet)"}.
+Known away players: ${game.awayRoster.filter((p) => !/^player\s*\d+$/i.test(p.name)).map((p) => p.name).join(", ") || "(none yet)"}.
+In note, mention the score source (scorebug/final graphic) and any uncertainty.`;
 }
 
 function applyAIBoxResult(game, data, label) {
   const notes = [];
   notes.push(...mergeAIRoster(game.homeRoster, data.home, game.homeName));
   notes.push(...mergeAIRoster(game.awayRoster, data.away, game.awayName));
-  if (data.homeScore != null && data.homeScore !== "") game.homeScore = Number(data.homeScore) || game.homeScore;
-  else game.homeScore = teamTotals(game.homeRoster).PTS;
-  if (data.awayScore != null && data.awayScore !== "") game.awayScore = Number(data.awayScore) || game.awayScore;
-  else game.awayScore = teamTotals(game.awayRoster).PTS;
+
+  const homeOfficial = (data.homeScore != null && data.homeScore !== "")
+    ? Math.max(0, Math.round(Number(data.homeScore)))
+    : teamTotals(game.homeRoster).PTS;
+  const awayOfficial = (data.awayScore != null && data.awayScore !== "")
+    ? Math.max(0, Math.round(Number(data.awayScore)))
+    : teamTotals(game.awayRoster).PTS;
+
+  notes.push(...reconcileRosterToScore(game.homeRoster, homeOfficial, game.homeName));
+  notes.push(...reconcileRosterToScore(game.awayRoster, awayOfficial, game.awayName));
+
+  game.homeScore = homeOfficial;
+  game.awayScore = awayOfficial;
+
+  const homeSum = teamTotals(game.homeRoster).PTS;
+  const awaySum = teamTotals(game.awayRoster).PTS;
+  const matched = homeSum === game.homeScore && awaySum === game.awayScore;
+  game.boxScoreAligned = matched;
+
   const summary = data.note || notes.join("; ") || `${label} box score update`;
+  const scoreLine = `Score ${game.homeScore}–${game.awayScore}` + (matched
+    ? " (roster PTS match)"
+    : ` (roster PTS ${homeSum}–${awaySum} — check Unassigned)`);
   game.events.unshift({
     id: uid(),
     t: Date.now(),
     home: game.homeScore,
     away: game.awayScore,
     dH: 0, dA: 0,
-    note: `${label}: ${summary}`,
+    note: `${label}: ${scoreLine}. ${summary}`,
     period: game.period,
     ai: true,
   });
-  return summary;
+  return { summary, matched, homeSum, awaySum };
 }
 
 async function callGeminiGenerate(model, body, apiKey) {
@@ -540,8 +617,10 @@ async function runGeminiYouTubeWatch(game) {
       throw new Error(`No content from Gemini (${finish})`);
     }
     const data = parseAIJson(content);
-    applyAIBoxResult(game, data, "AI Watch");
-    aiStatus = `Gemini watch applied via ${usedModel} — verify stats.`;
+    const watchResult = applyAIBoxResult(game, data, "AI Watch");
+    aiStatus = watchResult.matched
+      ? `Gemini (${usedModel}) applied — score ${game.homeScore}–${game.awayScore}, roster PTS match.`
+      : `Gemini (${usedModel}) applied — score ${game.homeScore}–${game.awayScore}; roster PTS ${watchResult.homeSum}–${watchResult.awaySum}. Check Unassigned.`;
     save();
   } catch (e) {
     aiStatus = `Gemini failed: ${e.message || e}`;
@@ -795,6 +874,8 @@ function boxTable(side, g) {
         <span class="num sm ${cls}">${side === "home" ? g.homeScore : g.awayScore}</span>
       </div>
       ${anyAI ? `<div class="ai-badge">AI-assisted — verify</div>` : ""}
+      ${g.boxScoreAligned === false ? `<div class="ai-badge warn">Score ${side === "home" ? g.homeScore : g.awayScore} vs roster PTS ${tot.PTS} — see Unassigned</div>` : ""}
+      ${g.boxScoreAligned === true && anyAI ? `<div class="muted ok">Roster PTS match team score</div>` : ""}
       <div class="table-wrap">
         <table class="box-table">
           <thead>
