@@ -152,3 +152,5 @@ input[type="file"] {
 
 .key-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; letter-spacing: 0.02em; }
 #settingsSaveMsg { color: #ff8b9a; margin-top: 8px; }
+
+.ai-badge.warn { background: rgba(255,138,74,.18); color: #ffb07a; margin-top: 6px; }
