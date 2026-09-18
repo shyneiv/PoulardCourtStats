@@ -154,3 +154,36 @@ input[type="file"] {
 #settingsSaveMsg { color: #ff8b9a; margin-top: 8px; }
 
 .ai-badge.warn { background: rgba(255,138,74,.18); color: #ffb07a; margin-top: 6px; }
+
+
+/* Jersey chips */
+.chip-hash { color: var(--muted); font-size: .75rem; font-weight: 700; }
+.chip-jersey {
+  width: 36px; background: transparent; border: 0; color: var(--accent);
+  font-size: .85rem; font-weight: 800; padding: 4px 0; text-align: center;
+}
+.chip-name { width: 88px; max-width: 36vw; }
+.roster-actions { gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.roster-actions .btn { padding: 6px 10px; font-size: .72rem; }
+.jersey-num { color: var(--accent); font-weight: 800; margin-right: 2px; }
+
+/* Period chips + snapshots */
+.period-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px; }
+.period-chip {
+  flex: 1; min-width: 48px; background: #0f1726; border: 1px solid var(--line);
+  color: var(--muted); border-radius: 999px; padding: 8px 10px; font-weight: 800;
+  font-size: .8rem; cursor: pointer;
+}
+.period-chip.on { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.snapshot-card { border-color: rgba(62,224,255,.35); }
+.snap-list { list-style: none; padding: 0; margin: 8px 0 0; }
+.snap-list li {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.snap-list li:last-child { border-bottom: 0; }
+
+/* Capture checklist */
+.capture-checklist { margin: 8px 0 6px; padding-left: 1.2rem; font-size: .82rem; }
+.capture-checklist li { margin: 4px 0; }
+.capture-checklist strong { color: var(--text); }

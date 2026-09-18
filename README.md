@@ -42,7 +42,7 @@ Settings (`courtstats.ai.v1`) store: OpenAI `apiKey` / `baseUrl` / `model` (scre
 
 1. Same Watch tab: upload/take a photo of the TV scorebug or box-score graphic.
 2. Configure OpenAI-compatible **API key**, **Base URL** (`https://api.openai.com/v1`), and vision **Model** (default `gpt-4o-mini`).
-3. Tap **AI Capture**. Merges returned JSON into both rosters by player name.
+3. Tap **AI Capture**. Merges returned JSON into both rosters by **jersey first, then name** (and may prompt to save a quarter snapshot).
 
 ### YouTube iframe limitation (screenshots)
 
@@ -60,3 +60,17 @@ Double-click `index.html` works for scoring. For YouTube embeds, hosting on HTTP
 
 
 If Gemini returns **503 / high demand**, the app automatically retries and tries fallback Flash models.
+
+
+## Rosters, jerseys & Unassigned
+
+- Each player can have an optional **jersey** number (`#23`). Edit name + jersey on **Box** or **Watch**.
+- Use **Clear placeholders** to drop default Player 1–5 rows and start with empty starters, then enter real names/numbers.
+- AI Capture / Gemini Watch prompts receive the roster as `Name (#jersey)` and are instructed to **match jersey first, then name**, prefer the known roster, and put leftover points on **Unassigned**.
+- Tip: set your roster (with jerseys) *before* capturing a full box-score graphic — that cuts Unassigned vs tiny scorebugs.
+
+## Quarter snapshots
+
+- Each game stores `snapshots[]` (deep copies of scores + both rosters) with period, time, note, and source.
+- On **Watch** and **Box**: period chips (Q1–Q4 / OT), **Save Q snapshot**, and **Restore** (with confirm).
+- After a successful AI Capture or Gemini Watch, the app offers to save the result as a Q{n} snapshot.

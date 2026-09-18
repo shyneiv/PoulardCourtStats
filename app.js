@@ -19,8 +19,9 @@ function emptyStats() {
   return s;
 }
 
-function makePlayer(name, i) {
-  return { id: uid(), name: name || `Player ${i}`, ...emptyStats(), aiAssisted: false };
+function makePlayer(name, i, jersey) {
+  const p = { id: uid(), name: name || `Player ${i}`, jersey: jersey != null && jersey !== "" ? String(jersey) : "", ...emptyStats(), aiAssisted: false };
+  return p;
 }
 
 function defaultRoster(prefix) {
@@ -37,7 +38,10 @@ function ensureRosters(game) {
   [...game.homeRoster, ...game.awayRoster].forEach((p) => {
     STAT_KEYS.forEach((k) => { if (typeof p[k] !== "number") p[k] = 0; });
     if (p.aiAssisted == null) p.aiAssisted = false;
+    if (p.jersey == null) p.jersey = "";
+    else p.jersey = String(p.jersey);
   });
+  if (!Array.isArray(game.snapshots)) game.snapshots = [];
   return game;
 }
 
@@ -60,6 +64,7 @@ function newGame(partial = {}) {
     events: [],
     homeRoster: defaultRoster("Player"),
     awayRoster: defaultRoster("Player"),
+    snapshots: [],
     selectedPlayerId: null,
     selectedSide: "home",
     createdAt: Date.now(),
@@ -283,23 +288,83 @@ function isPlaceholderPlayer(p) {
   return /^player\s*\d+$/i.test(String(p.name || "").trim());
 }
 
+function normalizeJersey(j) {
+  if (j == null || j === "") return "";
+  return String(j).trim().replace(/^#+/, "").replace(/\s+/g, "");
+}
+
+function formatRosterLabel(p) {
+  const name = String(p.name || "").trim() || "Player";
+  const j = normalizeJersey(p.jersey);
+  return j ? `${name} (#${j})` : name;
+}
+
+function rosterPromptList(roster) {
+  const real = (roster || []).filter((p) => !isPlaceholderPlayer(p) && !/^unassigned$/i.test(String(p.name || "").trim()));
+  if (!real.length) return "(none yet — prefer names/numbers from the graphic)";
+  return real.map(formatRosterLabel).join(", ");
+}
+
+function nameTokens(name) {
+  return String(name || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+}
+
+/** Fuzzy name: exact, last-name, or shared significant token. */
+function fuzzyNameMatch(existingName, incomingName) {
+  const a = String(existingName || "").trim().toLowerCase();
+  const b = String(incomingName || "").trim().toLowerCase();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  const ta = nameTokens(a);
+  const tb = nameTokens(b);
+  if (!ta.length || !tb.length) return false;
+  if (ta[ta.length - 1] === tb[tb.length - 1] && ta[ta.length - 1].length >= 3) return true;
+  const shared = ta.filter((t) => t.length >= 3 && tb.includes(t));
+  return shared.length > 0;
+}
+
+function findRosterMatch(existing, row) {
+  const jersey = normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num);
+  if (jersey) {
+    const byJ = existing.find((p) => normalizeJersey(p.jersey) === jersey && !isPlaceholderPlayer(p) && !/^unassigned$/i.test(p.name));
+    if (byJ) return byJ;
+  }
+  const name = String(row.name || "").trim();
+  if (!name) return null;
+  const exact = existing.find((p) => String(p.name || "").trim().toLowerCase() === name.toLowerCase());
+  if (exact) return exact;
+  return existing.find((p) => !isPlaceholderPlayer(p) && !/^unassigned$/i.test(p.name) && fuzzyNameMatch(p.name, name)) || null;
+}
+
 function mergeAIRoster(existing, incoming, sideLabel) {
-  const byName = new Map();
-  existing.forEach((p) => byName.set(String(p.name || "").trim().toLowerCase(), p));
   const notes = [];
   let addedReal = 0;
   (incoming || []).forEach((row) => {
     const name = String(row.name || "").trim();
-    if (!name) return;
-    if (/^player\s*\d+$/i.test(name)) return; // never import placeholders
-    const key = name.toLowerCase();
-    let p = byName.get(key);
+    const jerseyIn = normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num);
+    if (!name && !jerseyIn) return;
+    if (name && /^player\s*\d+$/i.test(name)) return; // never import placeholders
+    let p = findRosterMatch(existing, row);
     if (!p) {
-      p = makePlayer(name);
+      // Prefer known roster — only add if clearly a real name from graphic
+      if (!name || /^unassigned$/i.test(name)) {
+        // leave for reconcile / Unassigned
+        return;
+      }
+      p = makePlayer(name, undefined, jerseyIn || undefined);
       existing.push(p);
-      byName.set(key, p);
-      notes.push(`Added ${sideLabel} ${name}`);
+      notes.push(`Added ${sideLabel} ${formatRosterLabel(p)}`);
       addedReal += 1;
+    } else {
+      if (jerseyIn && !normalizeJersey(p.jersey)) p.jersey = jerseyIn;
+      else if (jerseyIn) p.jersey = jerseyIn;
+      if (name && isPlaceholderPlayer(p)) p.name = name;
+      else if (name && !fuzzyNameMatch(p.name, name) && normalizeJersey(p.jersey) && jerseyIn && normalizeJersey(p.jersey) === jerseyIn) {
+        // jersey matched; keep roster name unless placeholder
+      } else if (name && String(p.name).trim().toLowerCase() !== name.toLowerCase() && isPlaceholderPlayer(p)) {
+        p.name = name;
+      }
     }
     STAT_KEYS.forEach((k) => {
       if (row[k] != null && row[k] !== "") {
@@ -391,11 +456,12 @@ async function runAICapture(game, file, note) {
     const base = (aiCfg.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
     const system = `You are a basketball box-score OCR assistant. Read scorebugs, broadcast graphics, and box score images.
 Return STRICT JSON only (no markdown) with this shape:
-{"home":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[...],"homeScore":0,"awayScore":0,"note":""}
-Use integers. Omit unknown stats as 0. Prefer player names as shown on screen.
+{"home":[{"name":"","jersey":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[...],"homeScore":0,"awayScore":0,"note":""}
+Use integers. Omit unknown stats as 0. Include jersey as a string/number when visible (e.g. "23").
+MATCHING RULES: Match by jersey number FIRST (normalize #23 and 23), then by name. Prefer the known roster below. Only add a new player if they clearly appear on the graphic. Put unmatched points on a player named "Unassigned".
 Current home team: ${game.homeName}. Current away team: ${game.awayName}.
-Known home players: ${game.homeRoster.map((p) => p.name).join(", ")}.
-Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
+Known home players: ${rosterPromptList(game.homeRoster)}.
+Known away players: ${rosterPromptList(game.awayRoster)}.`;
     const userText = note
       ? `Optional note from user: ${note}\nExtract / update the box score JSON.`
       : "Extract / update the box score JSON from this image.";
@@ -434,6 +500,7 @@ Known away players: ${game.awayRoster.map((p) => p.name).join(", ")}.`;
     aiStatus = result.matched
       ? `AI update applied — score ${game.homeScore}–${game.awayScore}, roster PTS match.`
       : `AI update applied — score ${game.homeScore}–${game.awayScore}, but roster PTS were ${result.homeSum}–${result.awaySum}. Check Unassigned.`;
+    offerSnapshotAfterAI(game, "AI Capture");
     captureNote = "";
     save();
   } catch (e) {
@@ -460,15 +527,16 @@ CRITICAL ACCURACY RULES:
 2. For each team, the SUM of all player PTS MUST equal that team's homeScore/awayScore exactly.
 3. If you cannot attribute every point to a named player, put the remaining points on a player named "Unassigned" so the sums still match.
 4. Include only real players you can support from the video/graphic — never invent stars. Do not output placeholder names like "Player 1".
-5. Use integers only. Unknown non-PTS stats may be 0.
+5. Use integers only. Unknown non-PTS stats may be 0. Include "jersey" when visible (string like "23").
 6. home[] is ${game.homeName}; away[] is ${game.awayName}. Do not swap teams.
+7. MATCHING: Match by jersey number FIRST (treat #23 and 23 as the same), then by name. Prefer the known roster. Only add a new player if they clearly appear on the graphic/video.
 
 Return STRICT JSON only (no markdown) with this exact shape:
-{"home":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[{"name":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"homeScore":0,"awayScore":0,"note":""}
+{"home":[{"name":"","jersey":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"away":[{"name":"","jersey":"","PTS":0,"REB":0,"AST":0,"STL":0,"BLK":0,"TO":0,"FGM":0,"FGA":0,"TPM":0,"TPA":0,"FTM":0,"FTA":0,"PF":0}],"homeScore":0,"awayScore":0,"note":""}
 
 Current home team: ${game.homeName}. Current away team: ${game.awayName}.
-Known home players: ${game.homeRoster.filter((p) => !/^player\s*\d+$/i.test(p.name)).map((p) => p.name).join(", ") || "(none yet)"}.
-Known away players: ${game.awayRoster.filter((p) => !/^player\s*\d+$/i.test(p.name)).map((p) => p.name).join(", ") || "(none yet)"}.
+Known home players: ${rosterPromptList(game.homeRoster)}.
+Known away players: ${rosterPromptList(game.awayRoster)}.
 In note, mention the score source (scorebug/final graphic) and any uncertainty.`;
 }
 
@@ -510,6 +578,58 @@ function applyAIBoxResult(game, data, label) {
     ai: true,
   });
   return { summary, matched, homeSum, awaySum };
+}
+
+function deepCopyRoster(roster) {
+  return (roster || []).map((p) => {
+    const copy = { id: p.id, name: p.name, jersey: p.jersey != null ? String(p.jersey) : "", aiAssisted: !!p.aiAssisted };
+    STAT_KEYS.forEach((k) => { copy[k] = Number(p[k]) || 0; });
+    return copy;
+  });
+}
+
+function ensureSnapshots(game) {
+  if (!Array.isArray(game.snapshots)) game.snapshots = [];
+  return game.snapshots;
+}
+
+function saveQuarterSnapshot(game, source, note) {
+  ensureSnapshots(game);
+  const snap = {
+    id: uid(),
+    period: String(game.period || "1"),
+    t: Date.now(),
+    homeScore: Number(game.homeScore) || 0,
+    awayScore: Number(game.awayScore) || 0,
+    homeRoster: deepCopyRoster(game.homeRoster),
+    awayRoster: deepCopyRoster(game.awayRoster),
+    note: note || "",
+    source: source || "manual",
+  };
+  game.snapshots.unshift(snap);
+  return snap;
+}
+
+function restoreQuarterSnapshot(game, snapId) {
+  const snap = (game.snapshots || []).find((s) => s.id === snapId);
+  if (!snap) return false;
+  game.period = String(snap.period || game.period);
+  game.homeScore = Number(snap.homeScore) || 0;
+  game.awayScore = Number(snap.awayScore) || 0;
+  game.homeRoster = deepCopyRoster(snap.homeRoster);
+  game.awayRoster = deepCopyRoster(snap.awayRoster);
+  game.selectedPlayerId = null;
+  game.boxScoreAligned = undefined;
+  return true;
+}
+
+function offerSnapshotAfterAI(game, label) {
+  const period = String(game.period || "1");
+  const qLabel = period === "OT" ? "OT" : `Q${period}`;
+  if (confirm(`Save this as ${qLabel} snapshot?\n${game.homeScore}–${game.awayScore}`)) {
+    saveQuarterSnapshot(game, label || "ai", captureNote || "");
+    aiStatus = (aiStatus ? aiStatus + " · " : "") + `Saved ${qLabel} snapshot.`;
+  }
 }
 
 async function callGeminiGenerate(model, body, apiKey) {
@@ -621,6 +741,7 @@ async function runGeminiYouTubeWatch(game) {
     aiStatus = watchResult.matched
       ? `Gemini (${usedModel}) applied — score ${game.homeScore}–${game.awayScore}, roster PTS match.`
       : `Gemini (${usedModel}) applied — score ${game.homeScore}–${game.awayScore}; roster PTS ${watchResult.homeSum}–${watchResult.awaySum}. Check Unassigned.`;
+    offerSnapshotAfterAI(game, "AI Watch");
     save();
   } catch (e) {
     aiStatus = `Gemini failed: ${e.message || e}`;
@@ -843,16 +964,23 @@ function rosterEditor(side, g) {
   const roster = side === "home" ? g.homeRoster : g.awayRoster;
   const label = side === "home" ? g.homeName : g.awayName;
   const cls = side === "home" ? "home" : "away";
+  const hasPlaceholders = roster.some(isPlaceholderPlayer);
   return `
     <div class="roster-block">
       <div class="row spread">
         <strong class="${cls}">${escapeHtml(label)} roster</strong>
-        <button class="btn btn-ghost add-player" data-side="${side}">+ Player</button>
+        <div class="row roster-actions">
+          ${hasPlaceholders ? `<button class="btn btn-ghost clear-placeholders" data-side="${side}" title="Remove Player 1–5 placeholders">Clear placeholders</button>` : ""}
+          <button class="btn btn-ghost add-player" data-side="${side}">+ Player</button>
+        </div>
       </div>
+      <p class="muted">Edit name + #jersey. Replace Player 1–5 before Capture for fewer Unassigned.</p>
       <div class="roster-chips">
         ${roster.map((p) => `
           <div class="chip ${g.selectedPlayerId === p.id && g.selectedSide === side ? "sel" : ""}" data-side="${side}" data-pid="${p.id}">
-            <input class="chip-name" data-side="${side}" data-pid="${p.id}" value="${escapeHtml(p.name)}" />
+            <span class="chip-hash">#</span>
+            <input class="chip-jersey" data-side="${side}" data-pid="${p.id}" inputmode="numeric" placeholder="—" value="${escapeHtml(p.jersey || "")}" title="Jersey number" />
+            <input class="chip-name" data-side="${side}" data-pid="${p.id}" value="${escapeHtml(p.name)}" placeholder="Name" />
             <button class="chip-del" data-side="${side}" data-pid="${p.id}" title="Remove">×</button>
           </div>
         `).join("")}
@@ -888,7 +1016,7 @@ function boxTable(side, g) {
           <tbody>
             ${roster.map((p) => `
               <tr class="${g.selectedPlayerId === p.id && g.selectedSide === side ? "sel" : ""} ${p.aiAssisted ? "ai-row" : ""}" data-side="${side}" data-pid="${p.id}">
-                <td class="name">${escapeHtml(p.name)}${p.aiAssisted ? ' <span class="ai-dot" title="AI-assisted">✦</span>' : ""}</td>
+                <td class="name">${normalizeJersey(p.jersey) ? `<span class="jersey-num">#${escapeHtml(normalizeJersey(p.jersey))}</span> ` : ""}${escapeHtml(p.name)}${p.aiAssisted ? ' <span class="ai-dot" title="AI-assisted">✦</span>' : ""}</td>
                 <td>${p.PTS}</td><td>${p.REB}</td><td>${p.AST}</td><td>${p.STL}</td><td>${p.BLK}</td><td>${p.TO}</td>
                 <td>${p.FGM}-${p.FGA}</td><td>${p.TPM}-${p.TPA}</td><td>${p.FTM}-${p.FTA}</td><td>${p.PF}</td>
               </tr>
@@ -915,7 +1043,7 @@ function statPad(g) {
   return `
     <div class="card stat-pad">
       <div class="muted">Selected · ${escapeHtml(side === "home" ? g.homeName : g.awayName)}</div>
-      <strong>${escapeHtml(p.name)}</strong>
+      <strong>${normalizeJersey(p.jersey) ? `#${escapeHtml(normalizeJersey(p.jersey))} ` : ""}${escapeHtml(p.name)}</strong>
       <div class="stat-grid">
         ${["PTS","REB","AST","STL","BLK","TO","PF"].map((k) => `
           <div class="stat-cell">
@@ -936,16 +1064,51 @@ function statPad(g) {
   `;
 }
 
+function snapshotPanel(g) {
+  ensureSnapshots(g);
+  const period = String(g.period || "1");
+  const qLabel = period === "OT" ? "OT" : `Q${period}`;
+  return `
+    <div class="card snapshot-card">
+      <div class="row spread">
+        <strong>Quarter snapshots</strong>
+        <button class="btn btn-primary" id="saveQSnap">Save ${escapeHtml(qLabel)} snapshot</button>
+      </div>
+      <div class="period-chips" id="periodChips">
+        ${["1","2","3","4","OT"].map((p) => `
+          <button type="button" class="period-chip ${g.period === p ? "on" : ""}" data-period="${p}">${p === "OT" ? "OT" : "Q" + p}</button>
+        `).join("")}
+      </div>
+      <p class="muted">Saves a deep copy of current scores + rosters under the selected period.</p>
+      ${(g.snapshots || []).length ? `
+        <ul class="snap-list">
+          ${g.snapshots.map((s) => {
+            const lab = s.period === "OT" ? "OT" : `Q${s.period}`;
+            return `<li>
+              <div>
+                <strong>${escapeHtml(lab)}</strong> ${s.homeScore}–${s.awayScore}
+                <div class="muted">${escapeHtml(s.source || "manual")}${s.note ? " · " + escapeHtml(s.note) : ""} · ${fmtTime(s.t)}</div>
+              </div>
+              <button class="btn btn-ghost snap-restore" data-sid="${s.id}">Restore</button>
+            </li>`;
+          }).join("")}
+        </ul>
+      ` : `<div class="muted">No snapshots yet.</div>`}
+    </div>
+  `;
+}
+
 function renderBox(g) {
   return `
     ${rosterEditor("home", g)}
     ${rosterEditor("away", g)}
+    ${snapshotPanel(g)}
     ${boxTable("home", g)}
     ${boxTable("away", g)}
     ${statPad(g)}
     <div class="card">
       <button class="btn btn-ghost" id="boxOpenSettings">AI Settings</button>
-      <p class="muted">Tip: Watch tab — Gemini YouTube Watch or screenshot AI Capture.</p>
+      <p class="muted">Tip: Watch tab — Gemini YouTube Watch or screenshot AI Capture. Full box graphics cut Unassigned.</p>
     </div>
   `;
 }
@@ -969,13 +1132,14 @@ function renderWatch(g) {
     </div>
     ${rosterEditor("home", g)}
     ${rosterEditor("away", g)}
+    ${snapshotPanel(g)}
     <div class="side-toggle row">
       <button class="btn ${g.selectedSide === "home" ? "btn-primary" : "btn-ghost"} side-btn" data-side="home">${escapeHtml(g.homeName)}</button>
       <button class="btn ${g.selectedSide === "away" ? "btn-primary" : "btn-ghost"} side-btn" data-side="away">${escapeHtml(g.awayName)}</button>
     </div>
     <div class="roster-chips pick">
       ${(g.selectedSide === "away" ? g.awayRoster : g.homeRoster).map((p) => `
-        <button class="chip-pick ${g.selectedPlayerId === p.id ? "sel" : ""}" data-pid="${p.id}">${escapeHtml(p.name)}</button>
+        <button class="chip-pick ${g.selectedPlayerId === p.id ? "sel" : ""}" data-pid="${p.id}">${normalizeJersey(p.jersey) ? `#${escapeHtml(normalizeJersey(p.jersey))} ` : ""}${escapeHtml(p.name)}</button>
       `).join("")}
     </div>
     ${statPad(g)}
@@ -983,7 +1147,12 @@ function renderWatch(g) {
     ${boxTable("away", g)}
     <div class="card capture-card">
       <strong>AI Capture</strong>
-      <p class="muted">Upload or take a photo of the broadcast scorebug / box score graphic.</p>
+      <ol class="capture-checklist muted">
+        <li>Set period (Q1–Q4 / OT chips above)</li>
+        <li>Prefer a <strong>full box-score graphic</strong>, not a tiny scorebug</li>
+        <li>Optional note (e.g. end of Q3)</li>
+      </ol>
+      <p class="muted warn">Full box graphics reduce Unassigned — jersey numbers on the roster help matching.</p>
       <input type="file" id="aiFile" accept="image/*" />
       <div class="muted">Photo library or camera — screenshots work.</div>
       <label class="field"><span>Optional note</span>
@@ -1062,7 +1231,9 @@ function bindScore() {
     g.leadChanges = 0; g.largestLeadHome = 0; g.largestLeadAway = 0;
     g.homeRoster = defaultRoster("Player");
     g.awayRoster = defaultRoster("Player");
+    g.snapshots = [];
     g.selectedPlayerId = null;
+    g.boxScoreAligned = undefined;
     save(); render();
   };
 }
@@ -1072,10 +1243,29 @@ function bindRosterCommon(g) {
     b.onclick = () => {
       const side = b.dataset.side;
       const roster = side === "home" ? g.homeRoster : g.awayRoster;
-      const p = makePlayer(`Player ${roster.length + 1}`);
+      const p = makePlayer("", roster.length + 1);
+      p.name = "";
       roster.push(p);
       g.selectedSide = side;
       g.selectedPlayerId = p.id;
+      save(); render();
+    };
+  });
+  document.querySelectorAll(".clear-placeholders").forEach((b) => {
+    b.onclick = () => {
+      const side = b.dataset.side;
+      let roster = side === "home" ? g.homeRoster : g.awayRoster;
+      const kept = roster.filter((p) => !isPlaceholderPlayer(p));
+      if (!kept.length) {
+        const empty = makePlayer("", 1);
+        empty.name = "";
+        if (side === "home") g.homeRoster = [empty];
+        else g.awayRoster = [empty];
+      } else {
+        if (side === "home") g.homeRoster = kept;
+        else g.awayRoster = kept;
+      }
+      g.selectedPlayerId = null;
       save(); render();
     };
   });
@@ -1084,6 +1274,14 @@ function bindRosterCommon(g) {
       const roster = i.dataset.side === "home" ? g.homeRoster : g.awayRoster;
       const p = roster.find((x) => x.id === i.dataset.pid);
       if (p) { p.name = i.value; save(); }
+    };
+    i.onclick = (e) => e.stopPropagation();
+  });
+  document.querySelectorAll(".chip-jersey").forEach((i) => {
+    i.oninput = () => {
+      const roster = i.dataset.side === "home" ? g.homeRoster : g.awayRoster;
+      const p = roster.find((x) => x.id === i.dataset.pid);
+      if (p) { p.jersey = normalizeJersey(i.value); i.value = p.jersey; save(); }
     };
     i.onclick = (e) => e.stopPropagation();
   });
@@ -1125,10 +1323,36 @@ function bindRosterCommon(g) {
   });
 }
 
+function bindSnapshotPanel(g) {
+  document.querySelectorAll(".period-chip").forEach((b) => {
+    b.onclick = () => {
+      g.period = b.dataset.period;
+      save(); render();
+    };
+  });
+  const saveBtn = document.getElementById("saveQSnap");
+  if (saveBtn) saveBtn.onclick = () => {
+    const snap = saveQuarterSnapshot(g, "manual", captureNote || "");
+    const lab = snap.period === "OT" ? "OT" : `Q${snap.period}`;
+    aiStatus = `Saved ${lab} snapshot (${snap.homeScore}–${snap.awayScore}).`;
+    save(); render();
+  };
+  document.querySelectorAll(".snap-restore").forEach((b) => {
+    b.onclick = () => {
+      if (!confirm("Restore this snapshot? Current box/score will be replaced.")) return;
+      if (restoreQuarterSnapshot(g, b.dataset.sid)) {
+        aiStatus = "Snapshot restored.";
+        save(); render();
+      }
+    };
+  });
+}
+
 function bindBox() {
   const g = selected();
   if (!g || state.tab !== "box") return;
   bindRosterCommon(g);
+  bindSnapshotPanel(g);
   const s = document.getElementById("boxOpenSettings");
   if (s) s.onclick = () => { showSettings = true; render(); };
 }
@@ -1137,6 +1361,7 @@ function bindWatch() {
   const g = selected();
   if (!g || state.tab !== "watch") return;
   bindRosterCommon(g);
+  bindSnapshotPanel(g);
   document.querySelectorAll(".side-btn").forEach((b) => {
     b.onclick = () => {
       g.selectedSide = b.dataset.side;
