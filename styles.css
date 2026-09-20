@@ -187,3 +187,15 @@ input[type="file"] {
 .capture-checklist { margin: 8px 0 6px; padding-left: 1.2rem; font-size: .82rem; }
 .capture-checklist li { margin: 4px 0; }
 .capture-checklist strong { color: var(--text); }
+
+
+/* Roster from photo */
+.roster-photo-card { border-color: rgba(196,160,255,.4); }
+.roster-photo-sides { margin: 10px 0 6px; }
+.roster-photo-sides .btn { flex: 1; font-size: .85rem; padding: 10px 8px; }
+.roster-photo-btn {
+  width: 100%; margin: 10px 0 8px;
+  background: linear-gradient(135deg, #9b7bff, #3ee0ff);
+  color: #0b1220; font-weight: 800;
+}
+.roster-photo-card input[type="file"] { margin-top: 8px; }
