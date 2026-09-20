@@ -169,6 +169,8 @@ let aiBusy = false;
 let aiStatus = "";
 let showSettings = false;
 let captureNote = "";
+let rosterPhotoSide = "home"; // "home" | "away" | "both"
+let rosterPhotoNote = "";
 
 function save() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -434,6 +436,309 @@ async function fileToDataUrl(file) {
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+
+function rosterPhotoPrompt(game, sideHint) {
+  const sideLine = sideHint === "both"
+    ? 'The image may show BOTH home and away. Fill home[] and away[] and set side to "both".'
+    : sideHint === "away"
+      ? `Focus on the AWAY team (${game.awayName}). Put players in away[] and set side to "away". Leave home[] empty unless both are clearly shown.`
+      : `Focus on the HOME team (${game.homeName}). Put players in home[] and set side to "home". Leave away[] empty unless both are clearly shown.`;
+  return `You are a basketball roster OCR assistant. Read lineup cards, starting-5 graphics, written name lists, or jersey boards.
+Extract PLAYER names and jersey numbers only. Ignore coaches, referees, staff, and team names-as-players.
+Jersey numbers must NOT include a # character (e.g. "23" not "#23"). Prefer name + number when both are visible. Name-only is OK if no number.
+Return STRICT JSON only (no markdown) with this exact shape:
+{"side":"home"|"away"|"both","home":[{"name":"","jersey":""}],"away":[{"name":"","jersey":""}],"note":""}
+${sideLine}
+Current home team: ${game.homeName}. Current away team: ${game.awayName}.
+Known home players: ${rosterPromptList(game.homeRoster)}.
+Known away players: ${rosterPromptList(game.awayRoster)}.
+In note, briefly describe what you saw (e.g. starting 5 graphic).`;
+}
+
+function dataUrlParts(dataUrl) {
+  const m = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/i);
+  if (!m) throw new Error("Invalid image data URL");
+  return { mime: m[1], b64: m[2] };
+}
+
+function isMostlyPlaceholders(roster) {
+  const real = (roster || []).filter((p) => !isPlaceholderPlayer(p) && !/^unassigned$/i.test(String(p.name || "").trim()) && String(p.name || "").trim());
+  const placeholders = (roster || []).filter(isPlaceholderPlayer);
+  return real.length === 0 || placeholders.length >= real.length;
+}
+
+/** Apply roster-photo extraction: names/jerseys only — never wipe existing stats. */
+function applyRosterPhotoSide(roster, incoming, sideLabel) {
+  const rows = (incoming || []).filter((row) => {
+    const name = String(row.name || "").trim();
+    const jersey = normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num);
+    if (!name && !jersey) return false;
+    if (name && /^player\s*\d+$/i.test(name)) return false;
+    if (name && /^unassigned$/i.test(name)) return false;
+    return true;
+  });
+  if (!rows.length) return 0;
+
+  // Preserve Unassigned rows that already have PTS (safer: never clear Unassigned with PTS)
+  const keepUnassigned = (roster || []).filter((p) => /^unassigned$/i.test(String(p.name || "").trim()) && (Number(p.PTS) || 0) > 0);
+
+  let loaded = 0;
+  if (isMostlyPlaceholders(roster)) {
+    // Rebuild side from photo: replace placeholders / empty slots
+    const next = [];
+    rows.forEach((row) => {
+      const name = String(row.name || "").trim() || ("#" + (normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num) || (next.length + 1)));
+      const jersey = normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num);
+      const p = makePlayer(name, next.length + 1, jersey || undefined);
+      p.aiAssisted = true;
+      next.push(p);
+      loaded += 1;
+    });
+    keepUnassigned.forEach((u) => next.push(u));
+    if (!next.length) {
+      const empty = makePlayer("", 1);
+      empty.name = "";
+      next.push(empty);
+    }
+    roster.length = 0;
+    next.forEach((p) => roster.push(p));
+  } else {
+    // Merge into existing real roster by jersey then name; update name/jersey only
+    rows.forEach((row) => {
+      const name = String(row.name || "").trim();
+      const jerseyIn = normalizeJersey(row.jersey != null ? row.jersey : row.number != null ? row.number : row.num);
+      let p = findRosterMatch(roster, row);
+      if (!p) {
+        // Try matching a placeholder slot first
+        p = roster.find(isPlaceholderPlayer);
+        if (p) {
+          if (name) p.name = name;
+          if (jerseyIn) p.jersey = jerseyIn;
+          p.aiAssisted = true;
+          loaded += 1;
+          return;
+        }
+        if (!name && !jerseyIn) return;
+        p = makePlayer(name || ("#" + (jerseyIn || "")), undefined, jerseyIn || undefined);
+        p.aiAssisted = true;
+        roster.push(p);
+        loaded += 1;
+      } else {
+        if (jerseyIn) p.jersey = jerseyIn;
+        if (name && (isPlaceholderPlayer(p) || !String(p.name || "").trim())) p.name = name;
+        else if (name && isPlaceholderPlayer(p)) p.name = name;
+        // Do NOT touch stats
+        p.aiAssisted = true;
+        loaded += 1;
+      }
+    });
+    // Drop leftover zero-stat placeholders once real names arrived
+    for (let i = roster.length - 1; i >= 0; i--) {
+      if (isPlaceholderPlayer(roster[i]) && (Number(roster[i].PTS) || 0) === 0) roster.splice(i, 1);
+    }
+  }
+  return loaded;
+}
+
+function applyRosterFromPhoto(game, data, requestedSide) {
+  const aiSide = String(data.side || requestedSide || "home").toLowerCase();
+  let sides = [];
+  if (requestedSide === "both" || aiSide === "both") {
+    sides = ["home", "away"];
+  } else if (requestedSide === "away") {
+    sides = ["away"];
+  } else if (requestedSide === "home") {
+    sides = ["home"];
+  } else {
+    sides = aiSide === "away" ? ["away"] : ["home"];
+  }
+  let total = 0;
+  if (sides.includes("home")) total += applyRosterPhotoSide(game.homeRoster, data.home, game.homeName);
+  if (sides.includes("away")) total += applyRosterPhotoSide(game.awayRoster, data.away, game.awayName);
+  // Fallback: if requested one side but AI put names on the other array
+  if (total === 0) {
+    if ((data.home || []).length) total += applyRosterPhotoSide(game.homeRoster, data.home, game.homeName);
+    if ((data.away || []).length) total += applyRosterPhotoSide(game.awayRoster, data.away, game.awayName);
+  }
+  const note = data.note ? String(data.note) : "";
+  game.events.unshift({
+    id: uid(),
+    t: Date.now(),
+    home: game.homeScore,
+    away: game.awayScore,
+    dH: 0, dA: 0,
+    note: `Roster photo: loaded ${total} name${total === 1 ? "" : "s"}${note ? " — " + note : ""}`,
+    period: game.period,
+    ai: true,
+  });
+  return total;
+}
+
+async function extractRosterViaOpenAI(game, dataUrl, note, sideHint) {
+  const base = (aiCfg.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "");
+  const system = rosterPhotoPrompt(game, sideHint);
+  const userText = note
+    ? `Optional note from user: ${note}\nExtract the roster JSON. User selected side: ${sideHint}.`
+    : `Extract the roster JSON. User selected side: ${sideHint}.`;
+  const body = {
+    model: aiCfg.model || "gpt-4o-mini",
+    temperature: 0.1,
+    messages: [
+      { role: "system", content: system },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: userText },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+  };
+  const res = await fetch(`${base}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${aiCfg.apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`OpenAI ${res.status}: ${errText.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  const content = json.choices?.[0]?.message?.content || "";
+  return parseAIJson(content);
+}
+
+async function extractRosterViaGemini(game, dataUrl, note, sideHint) {
+  const { mime, b64 } = dataUrlParts(dataUrl);
+  const prompt = rosterPhotoPrompt(game, sideHint) + (note ? `\nOptional note from user: ${note}` : "") + `\nUser selected side: ${sideHint}.`;
+  const body = {
+    contents: [{
+      parts: [
+        { inline_data: { mime_type: mime, data: b64 } },
+        { text: prompt },
+      ],
+    }],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json",
+    },
+  };
+  const models = geminiModelFallbackChain(aiCfg.geminiModel);
+  let lastErr = null;
+  let json = null;
+  for (let mi = 0; mi < models.length; mi++) {
+    const model = models[mi];
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      aiStatus = `Gemini (${model}) reading roster… attempt ${attempt}/3`;
+      render();
+      const { res, errText } = await callGeminiGenerate(model, body, aiCfg.geminiKey);
+      if (!res.ok) {
+        lastErr = new Error(`Gemini ${res.status}: ${errText.slice(0, 280)}`);
+        if (res.status === 404) break;
+        if (isRetryableGeminiStatus(res.status) && attempt < 3) {
+          await sleep(1500 * attempt * attempt);
+          continue;
+        }
+        if (isRetryableGeminiStatus(res.status)) break;
+        throw lastErr;
+      }
+      try { json = JSON.parse(errText); } catch {
+        throw new Error("Gemini returned non-JSON response");
+      }
+      lastErr = null;
+      break;
+    }
+    if (json) break;
+  }
+  if (!json) throw lastErr || new Error("Gemini unavailable after retries");
+  const block = json.promptFeedback?.blockReason;
+  if (block) throw new Error(`Gemini blocked: ${block}`);
+  const content = (json.candidates || [])
+    .map((c) => (c.content?.parts || []).map((p) => p.text || "").join(""))
+    .join("\n")
+    .trim();
+  if (!content) throw new Error("No content from Gemini");
+  return parseAIJson(content);
+}
+
+async function runRosterFromPhoto(game, file, note, sideHint) {
+  if (!aiCfg.apiKey && !aiCfg.geminiKey) {
+    aiStatus = "Set an OpenAI or Gemini API key in Settings first.";
+    showSettings = true;
+    render();
+    return;
+  }
+  if (!file) {
+    aiStatus = "Choose a lineup / starting-5 / written-names photo.";
+    render();
+    return;
+  }
+  aiBusy = true;
+  aiStatus = "Reading roster from photo…";
+  render();
+  try {
+    const dataUrl = await fileToDataUrl(file);
+    const hint = sideHint || rosterPhotoSide || "home";
+    let data;
+    if (aiCfg.apiKey) {
+      data = await extractRosterViaOpenAI(game, dataUrl, note, hint);
+    } else {
+      data = await extractRosterViaGemini(game, dataUrl, note, hint);
+    }
+    const count = applyRosterFromPhoto(game, data, hint);
+    aiStatus = count > 0
+      ? `Roster photo: loaded ${count} name${count === 1 ? "" : "s"}.`
+      : "Roster photo: no player names found — try a clearer image or switch Home/Away.";
+    rosterPhotoNote = "";
+    save();
+  } catch (e) {
+    aiStatus = `Roster photo failed: ${e.message || e}`;
+  } finally {
+    aiBusy = false;
+    render();
+  }
+}
+
+function rosterFromPhotoCard(g) {
+  return `
+    <div class="card roster-photo-card">
+      <strong>Roster from photo</strong>
+      <div class="side-toggle row roster-photo-sides">
+        <button type="button" class="btn ${rosterPhotoSide === "home" ? "btn-primary" : "btn-ghost"} roster-photo-side" data-rside="home">Home</button>
+        <button type="button" class="btn ${rosterPhotoSide === "away" ? "btn-primary" : "btn-ghost"} roster-photo-side" data-rside="away">Away</button>
+        <button type="button" class="btn ${rosterPhotoSide === "both" ? "btn-primary" : "btn-ghost"} roster-photo-side" data-rside="both">Both</button>
+      </div>
+      <input type="file" id="rosterPhotoFile" accept="image/*" />
+      <div class="muted">Photo library or camera — lineup, starting 5, or written names.</div>
+      <label class="field"><span>Optional note</span>
+        <input type="text" id="rosterPhotoNote" placeholder="e.g. home starting 5 graphic" value="${escapeHtml(rosterPhotoNote)}" />
+      </label>
+      <button class="btn btn-primary roster-photo-btn" id="rosterPhotoRun" ${aiBusy ? "disabled" : ""}>${aiBusy ? "Working…" : "✦ Read roster"}</button>
+      <p class="muted">Upload a lineup, starting 5 graphic, or written names; uses OpenAI vision key if set, else Gemini key as fallback.</p>
+      ${aiStatus ? `<div class="ai-status">${escapeHtml(aiStatus)}</div>` : ""}
+    </div>
+  `;
+}
+
+function bindRosterPhoto(g) {
+  document.querySelectorAll(".roster-photo-side").forEach((b) => {
+    b.onclick = () => {
+      rosterPhotoSide = b.dataset.rside || "home";
+      render();
+    };
+  });
+  const noteEl = document.getElementById("rosterPhotoNote");
+  if (noteEl) noteEl.oninput = () => { rosterPhotoNote = noteEl.value; };
+  const run = document.getElementById("rosterPhotoRun");
+  if (run) run.onclick = () => {
+    const file = document.getElementById("rosterPhotoFile")?.files?.[0];
+    runRosterFromPhoto(g, file, document.getElementById("rosterPhotoNote")?.value || "", rosterPhotoSide);
+  };
 }
 
 async function runAICapture(game, file, note) {
@@ -1102,6 +1407,7 @@ function renderBox(g) {
   return `
     ${rosterEditor("home", g)}
     ${rosterEditor("away", g)}
+    ${rosterFromPhotoCard(g)}
     ${snapshotPanel(g)}
     ${boxTable("home", g)}
     ${boxTable("away", g)}
@@ -1132,6 +1438,7 @@ function renderWatch(g) {
     </div>
     ${rosterEditor("home", g)}
     ${rosterEditor("away", g)}
+    ${rosterFromPhotoCard(g)}
     ${snapshotPanel(g)}
     <div class="side-toggle row">
       <button class="btn ${g.selectedSide === "home" ? "btn-primary" : "btn-ghost"} side-btn" data-side="home">${escapeHtml(g.homeName)}</button>
@@ -1352,6 +1659,7 @@ function bindBox() {
   const g = selected();
   if (!g || state.tab !== "box") return;
   bindRosterCommon(g);
+  bindRosterPhoto(g);
   bindSnapshotPanel(g);
   const s = document.getElementById("boxOpenSettings");
   if (s) s.onclick = () => { showSettings = true; render(); };
@@ -1361,6 +1669,7 @@ function bindWatch() {
   const g = selected();
   if (!g || state.tab !== "watch") return;
   bindRosterCommon(g);
+  bindRosterPhoto(g);
   bindSnapshotPanel(g);
   document.querySelectorAll(".side-btn").forEach((b) => {
     b.onclick = () => {
