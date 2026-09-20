@@ -69,6 +69,10 @@ If Gemini returns **503 / high demand**, the app automatically retries and tries
 - AI Capture / Gemini Watch prompts receive the roster as `Name (#jersey)` and are instructed to **match jersey first, then name**, prefer the known roster, and put leftover points on **Unassigned**.
 - Tip: set your roster (with jerseys) *before* capturing a full box-score graphic — that cuts Unassigned vs tiny scorebugs.
 
+## Roster from photo
+
+On **Box** or **Watch**, use **Roster from photo** near the roster editor: pick Home / Away / Both, upload a lineup, starting-5 graphic, or written names (photo library OK — no forced camera), then tap **✦ Read roster**. Prefers your OpenAI-compatible vision key; falls back to Gemini with an inline image. Names + jersey numbers merge into the side roster (rebuilds placeholders; merges into an existing real roster without wiping stats).
+
 ## Quarter snapshots
 
 - Each game stores `snapshots[]` (deep copies of scores + both rosters) with period, time, note, and source.
